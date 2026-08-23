@@ -7,6 +7,7 @@ export async function ingestWebhook<TParsed>(input: {
   defaultEventType: WebhookEventType;
   rawBody: string;
   ip: string | undefined;
+  persistPayload: boolean;
   schema: {
     safeParse: (input: unknown) => { success: boolean; data?: unknown; error?: unknown };
   };
@@ -50,7 +51,7 @@ export async function ingestWebhook<TParsed>(input: {
   const result = await storeWebhookEvent({
     eventType: input.defaultEventType,
     requestIp: input.ip ?? null,
-    payload,
+    payload: input.persistPayload ? payload : null,
     bodySha256,
     error,
   });

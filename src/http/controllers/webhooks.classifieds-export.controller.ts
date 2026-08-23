@@ -3,6 +3,7 @@ import type { z } from 'zod';
 
 import { ClassifiedsExport as s_ClassifiedsExport } from '@immoteur/openapi-zod';
 
+import type { ClassifiedsExportStorageMode } from '../../env.js';
 import { mapClassifiedToUpsertDto } from '../mappers/classified.mapper.js';
 import { upsertClassifieds } from '../../modules/classifieds/classified.repository.js';
 import { ingestWebhook } from '../../modules/webhooks/webhook-ingest.service.js';
@@ -11,7 +12,9 @@ const RAW_LIMIT = '10mb';
 
 type ClassifiedsExport = z.infer<typeof s_ClassifiedsExport>;
 
-export function createImmoteurClassifiedsExportWebhookController(): Router {
+export function createImmoteurClassifiedsExportWebhookController(
+  storageMode: ClassifiedsExportStorageMode = 'persist',
+): Router {
   const router = Router();
 
   router.use(express.raw({ type: '*/*', limit: RAW_LIMIT }));
@@ -24,6 +27,7 @@ export function createImmoteurClassifiedsExportWebhookController(): Router {
       schema: s_ClassifiedsExport,
       ip: req.ip,
       rawBody,
+      persistPayload: storageMode === 'persist',
     });
 
     if (!ingested.ok) {
@@ -34,7 +38,7 @@ export function createImmoteurClassifiedsExportWebhookController(): Router {
 
     const webhookEventId = ingested.webhookEventId;
     const receivedAt = ingested.receivedAt;
-    if (ingested.parsed && webhookEventId && receivedAt) {
+    if (storageMode === 'persist' && ingested.parsed && webhookEventId && receivedAt) {
       const dtos = ingested.parsed.items.map((classified) =>
         mapClassifiedToUpsertDto({
           provider: 'immoteur',

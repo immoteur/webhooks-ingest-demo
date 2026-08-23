@@ -1,4 +1,5 @@
 # Webhook Ingestion API (Demo)
+
 <!-- immoteur-runtime: node=24 -->
 
 Demo Node.js (TypeScript) webhook ingestion API that persists webhook events to PostgreSQL (Drizzle ORM + managed migrations), optimized for Metabase to read directly from the DB.
@@ -99,8 +100,10 @@ This repo includes a simple Caddy reverse-proxy setup (`docker-compose.caddy.yml
    - `POSTGRES_PASSWORD`, `API_DB_PASSWORD`, `METABASE_READER_PASSWORD`, `METABASE_ADMIN_PASSWORD`
    - `ACME_EMAIL`, `API_DOMAIN`, `METABASE_DOMAIN`
    - Optional: `WEBHOOK_ALLOWED_IP` (single IP/CIDR) to enable the API’s `/webhooks/*` IP allowlist
+   - Optional: `CLASSIFIEDS_EXPORT_STORAGE_MODE` controls `POST /webhooks/classifieds-export` storage. `persist` is the default and stores export payloads and listings for the local demo and Metabase. `metadata-only` validates and acknowledges exports without storing their payloads or materializing listings; see [Export storage mode](#export-storage-mode).
    - Optional: `WEBHOOK_EVENTS_RETENTION_HOURS` (default `24`) and `CLASSIFIEDS_LAST_SEEN_RETENTION_DAYS` (default `7`) for hourly retention cleanup
-   - Optional: `WEBHOOK_EVENTS_MAX_ROWS` and `CLASSIFIEDS_MAX_ROWS` (default `0`, disabled) to cap row counts to the newest data (webhook events only prune unreferenced rows)
+   - Optional: `WEBHOOK_EVENTS_MAX_ROWS` and `CLASSIFIEDS_MAX_ROWS` (default `0`, disabled) to retain only the newest rows. Webhook-event cleanup only removes rows that are no longer referenced by a listing.
+   - Optional: `WEBHOOK_PAYLOAD_RETENTION_MAX_BYTES` (default `8589934592`, 8 GiB) is the logical byte budget for retained webhook JSON payloads. The scheduled cleanup clears older stored payloads when the budget is exceeded; it does not guarantee a physical PostgreSQL or filesystem size.
 3. Start the production stack:
 
 ```bash
@@ -124,7 +127,23 @@ This service exposes **reliable** ingestion endpoints under:
 - `POST /webhooks/classified-notification`
 - `POST /webhooks/classifieds-export`
 
-Each request is JSON-parsed and validated with OpenAPI-derived `Zod.safeParse`, then recorded in `webhook_events` with `payload` (when JSON parses), `body_sha256`, `request_ip`, and `error` when validation fails. The demo intentionally does **not** persist raw request bodies or headers.
+Each request is JSON-parsed and validated with OpenAPI-derived `Zod.safeParse`. The service records `body_sha256`, `request_ip`, and validation errors in `webhook_events`; whether it retains a parsed `payload` depends on the endpoint and export storage mode. The demo intentionally does **not** persist raw request bodies or headers.
+
+### Export storage mode
+
+`CLASSIFIEDS_EXPORT_STORAGE_MODE` applies only to `POST /webhooks/classifieds-export`:
+
+- `persist` is the default. It stores a parsed export payload in `webhook_events` and materializes its listings, images, and price history. Keep this mode for the local demo when you want Metabase to query export data.
+- `metadata-only` is for receivers that need to accept exports without retaining their contents. The endpoint still applies the IP allowlist when configured, parses JSON, validates the payload against the OpenAPI-derived schema, calculates `body_sha256`, and stores a receipt with request metadata or a validation error. It returns the same HTTP response behavior as `persist` mode, but stores no export `payload` and writes no `classifieds`, `classified_images`, or `classified_price_history` rows.
+
+Use `metadata-only` for a hosted sink when you need delivery receipts without building a local listings dataset. The default remains `persist`, so cloning the project and running the local demo continues to populate Metabase.
+
+The existing retention variables are complementary safeguards:
+
+- `WEBHOOK_EVENTS_RETENTION_HOURS` removes old unreferenced webhook-event receipts.
+- `WEBHOOK_EVENTS_MAX_ROWS` retains only the newest unreferenced webhook-event receipts when set above `0`.
+- `WEBHOOK_PAYLOAD_RETENTION_MAX_BYTES` clears older stored JSON payloads to the configured logical byte budget. It does not reserve disk space, limit the size of a write before it is accepted, or guarantee PostgreSQL's physical disk usage.
+- `CLASSIFIEDS_LAST_SEEN_RETENTION_DAYS` and `CLASSIFIEDS_MAX_ROWS` control cleanup of materialized listings in `persist` mode.
 
 ### IP allowlist
 
@@ -207,7 +226,7 @@ Metabase should connect directly to Postgres using a read-only user.
 
 Metabase can query:
 
-- `webhook_events` (append-only raw ingestion log)
+- `webhook_events` (ingestion receipts; JSON payloads depend on the selected storage mode and retention settings)
 - `classifieds` (flattened columns for the `classified-notification` payload)
 - `classified_images` (one row per image, FK to `classifieds`)
 - `classified_price_history` (one row per price change, FK to `classifieds`)

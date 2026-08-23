@@ -123,6 +123,7 @@ function getPgErrorCode(err: CodedError | null | undefined): string | undefined 
 describe('webhook ingestion', () => {
   let container: StartedPostgreSqlContainer;
   let app: Express;
+  let metadataOnlyApp: Express;
   let db: Db;
   let pool: DbPool;
 
@@ -143,6 +144,7 @@ describe('webhook ingestion', () => {
 
     const { createApp } = await import('../src/server.js');
     app = createApp();
+    metadataOnlyApp = createApp({ classifiedsExportStorageMode: 'metadata-only' });
   });
 
   beforeEach(async () => {
@@ -271,6 +273,7 @@ describe('webhook ingestion', () => {
     expect(eventRows).toHaveLength(1);
     expect(eventRows[0]!.eventType).toBe('classifieds-export');
     expect(eventRows[0]!.error).toBeNull();
+    expect(eventRows[0]!.payload).not.toBeNull();
 
     if (firstItemId) {
       const classifiedRows = await db
@@ -280,6 +283,146 @@ describe('webhook ingestion', () => {
       expect(classifiedRows).toHaveLength(1);
       expect(classifiedRows[0]!.lastWebhookEventId).toBe(eventRows[0]!.id);
     }
+  });
+
+  it('metadata-only export stores receipt without listings', async () => {
+    // Given
+    const body = classifiedsExportExample;
+
+    // When
+    const res = await request(metadataOnlyApp)
+      .post('/webhooks/classifieds-export')
+      .set('content-type', 'application/json')
+      .send(body);
+
+    // Then
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, duplicate: false });
+
+    const eventRows = await db.select().from(webhookEvents);
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]).toMatchObject({
+      eventType: 'classifieds-export',
+      payload: null,
+      error: null,
+    });
+    expect(eventRows[0]?.bodySha256).toMatch(/^[0-9a-f]{64}$/);
+
+    await expect(db.select().from(classifieds)).resolves.toHaveLength(0);
+    await expect(db.select().from(classifiedImages)).resolves.toHaveLength(0);
+    await expect(db.select().from(classifiedPriceHistory)).resolves.toHaveLength(0);
+  });
+
+  it('metadata-only export stores validation errors without payloads', async () => {
+    // Given
+    const body = { exportId: classifiedsExportExample.exportId, items: [{}] };
+
+    // When
+    const res = await request(metadataOnlyApp)
+      .post('/webhooks/classifieds-export')
+      .set('content-type', 'application/json')
+      .send(body);
+
+    // Then
+    expect(res.status).toBe(200);
+
+    const eventRows = await db.select().from(webhookEvents);
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]?.payload).toBeNull();
+    expect(eventRows[0]?.error).toMatch(/^schema_invalid:/);
+    await expect(db.select().from(classifieds)).resolves.toHaveLength(0);
+  });
+
+  it('metadata-only export stores malformed JSON errors without payloads', async () => {
+    // Given
+    const raw = '{"exportId":';
+
+    // When
+    const res = await request(metadataOnlyApp)
+      .post('/webhooks/classifieds-export')
+      .set('content-type', 'application/json')
+      .send(raw);
+
+    // Then
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, duplicate: false });
+
+    const eventRows = await db.select().from(webhookEvents);
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]?.payload).toBeNull();
+    expect(eventRows[0]?.error).toMatch(/^invalid_json:/);
+    expect(eventRows[0]?.bodySha256).toBe(createHash('sha256').update(raw, 'utf8').digest('hex'));
+    await expect(db.select().from(classifieds)).resolves.toHaveLength(0);
+  });
+
+  it('metadata-only export stores append-only receipts for repeated payloads', async () => {
+    // Given
+    const body = classifiedsExportExample;
+
+    // When
+    const firstResponse = await request(metadataOnlyApp)
+      .post('/webhooks/classifieds-export')
+      .set('content-type', 'application/json')
+      .send(body);
+    const secondResponse = await request(metadataOnlyApp)
+      .post('/webhooks/classifieds-export')
+      .set('content-type', 'application/json')
+      .send(body);
+
+    // Then
+    expect(firstResponse.status).toBe(200);
+    expect(firstResponse.body).toMatchObject({ ok: true, duplicate: false });
+    expect(secondResponse.status).toBe(200);
+    expect(secondResponse.body).toMatchObject({ ok: true, duplicate: false });
+
+    const eventRows = await db.select().from(webhookEvents);
+    expect(eventRows).toHaveLength(2);
+    expect(eventRows.every((row) => row.payload === null)).toBe(true);
+    expect(eventRows[0]?.bodySha256).toBe(eventRows[1]?.bodySha256);
+    await expect(db.select().from(classifieds)).resolves.toHaveLength(0);
+  });
+
+  it('metadata-only export returns 500 when receipt storage fails', async () => {
+    // Given
+    await pool.query('ALTER TABLE webhook_events RENAME TO webhook_events_unavailable');
+
+    // When
+    let res;
+    try {
+      res = await request(metadataOnlyApp)
+        .post('/webhooks/classifieds-export')
+        .set('content-type', 'application/json')
+        .send(classifiedsExportExample);
+    } finally {
+      await pool.query('ALTER TABLE webhook_events_unavailable RENAME TO webhook_events');
+    }
+
+    // Then
+    expect(res.status).toBe(500);
+    expect(res.body).toMatchObject({ ok: false });
+    await expect(db.select().from(webhookEvents)).resolves.toHaveLength(0);
+    await expect(db.select().from(classifieds)).resolves.toHaveLength(0);
+  });
+
+  it('metadata-only export mode keeps notification persistence', async () => {
+    // Given
+    const body = classifiedNotificationExample;
+
+    // When
+    const res = await request(metadataOnlyApp)
+      .post('/webhooks/classified-notification')
+      .set('content-type', 'application/json')
+      .send(body);
+
+    // Then
+    expect(res.status).toBe(200);
+
+    const eventRows = await db.select().from(webhookEvents);
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]?.payload).not.toBeNull();
+    await expect(db.select().from(classifieds)).resolves.toHaveLength(1);
+    await expect(db.select().from(classifiedImages)).resolves.toHaveLength(1);
+    await expect(db.select().from(classifiedPriceHistory)).resolves.toHaveLength(1);
   });
 
   it('stores multiple export events for repeated payloads', async () => {

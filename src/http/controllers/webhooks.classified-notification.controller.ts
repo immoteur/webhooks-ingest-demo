@@ -24,6 +24,7 @@ export function createImmoteurClassifiedNotificationWebhookController(): Router 
       schema: s_Classified,
       ip: req.ip,
       rawBody,
+      persistPayload: true,
     });
 
     if (!ingested.ok) {

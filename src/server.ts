@@ -1,10 +1,10 @@
 import express, { type Express, type NextFunction, type Request, type Response } from 'express';
 import { pinoHttp } from 'pino-http';
 
-import { registerRoutes } from './http/routes.js';
+import { registerRoutes, type WebhookRouteOptions } from './http/routes.js';
 import { logger } from './logger.js';
 
-export function createApp(options?: { webhookAllowedIp?: string }): Express {
+export function createApp(options?: WebhookRouteOptions): Express {
   const app = express();
 
   if (process.env.NODE_ENV === 'production') {
