@@ -32,12 +32,14 @@ export async function ingestWebhook<TParsed>(input: {
   let parsed: TParsed | null = null;
 
   if (!jsonResult.success) {
-    error = `invalid_json: ${jsonResult.error}`;
+    error = input.persistPayload ? `invalid_json: ${jsonResult.error}` : 'invalid_json';
   } else {
     payload = jsonResult.data;
     const schemaResult = input.schema.safeParse(jsonResult.data);
     if (!schemaResult.success) {
-      error = `schema_invalid: ${String(schemaResult.error)}`;
+      error = input.persistPayload
+        ? `schema_invalid: ${String(schemaResult.error)}`
+        : 'schema_invalid';
     } else {
       parsed = schemaResult.data as TParsed;
     }

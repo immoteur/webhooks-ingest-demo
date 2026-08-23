@@ -329,7 +329,7 @@ describe('webhook ingestion', () => {
     const eventRows = await db.select().from(webhookEvents);
     expect(eventRows).toHaveLength(1);
     expect(eventRows[0]?.payload).toBeNull();
-    expect(eventRows[0]?.error).toMatch(/^schema_invalid:/);
+    expect(eventRows[0]?.error).toBe('schema_invalid');
     await expect(db.select().from(classifieds)).resolves.toHaveLength(0);
   });
 
@@ -350,8 +350,34 @@ describe('webhook ingestion', () => {
     const eventRows = await db.select().from(webhookEvents);
     expect(eventRows).toHaveLength(1);
     expect(eventRows[0]?.payload).toBeNull();
-    expect(eventRows[0]?.error).toMatch(/^invalid_json:/);
+    expect(eventRows[0]?.error).toBe('invalid_json');
     expect(eventRows[0]?.bodySha256).toBe(createHash('sha256').update(raw, 'utf8').digest('hex'));
+    await expect(db.select().from(classifieds)).resolves.toHaveLength(0);
+  });
+
+  it('metadata-only oversized invalid export stores bounded receipt', async () => {
+    // Given
+    const body = {
+      exportId: classifiedsExportExample.exportId,
+      items: [{ unexpected: 'x'.repeat(9 * 1024 * 1024) }],
+    };
+
+    // When
+    const res = await request(metadataOnlyApp)
+      .post('/webhooks/classifieds-export')
+      .set('content-type', 'application/json')
+      .send(body);
+
+    // Then
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ ok: true, duplicate: false });
+
+    const eventRows = await db.select().from(webhookEvents);
+    expect(eventRows).toHaveLength(1);
+    expect(eventRows[0]?.payload).toBeNull();
+    expect(eventRows[0]?.error).toBe('schema_invalid');
+    expect(eventRows[0]?.error?.length).toBeLessThanOrEqual(32);
+    expect(eventRows[0]?.bodySha256).toMatch(/^[0-9a-f]{64}$/);
     await expect(db.select().from(classifieds)).resolves.toHaveLength(0);
   });
 
